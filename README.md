@@ -11,7 +11,8 @@ Focus mode, spotify widget, timer, display control, audio control, video seeking
 - [Link 1](https://youtu.be/nZa-Vqu-_fU?si=lMTd3ZH6neU1eF7T)
 - [Haptic Feedback link](https://github.com/scottbez1/smartknob)
 - [Commercial](https://www.robbshop.nl/aqara-touchscreen-dial-v1)
-
+- [Knob over display](https://youtu.be/zIrAe23f8sg?si=emXmF2cq_3vrgdvM)
+ 
 
 ### Concept:
 We have a display showing the light in question, the media, the timer and the widget or wtv on top. Surrounding it is the dial/knob that changes the value. This dial is either changed through an offset gear or if budget permits: a [hollow encoder](https://nl.mouser.com/en/ProductDetail/Bourns/PER561-P115-N0015?qs=IS%252B4QmGtzzrAUR9c1BGEfg%3D%3D). 
@@ -28,15 +29,6 @@ Mechanically, there are some challenges, but it's pretty simple and will be done
 - 1.28 inch Round IPS-TFT Display - 240*240 pixels - SPI - GC9A01 - 3.3V
 - BH1750 16bit Digital I2C Light Sensor Module
 - DFRobot Fermion EC11 Rotary Encoder Module
-
-
-- **ESP32-C3 `GPIO 6`** $\rightarrow$ **Encoder Phase A (CLK)**
-    
-- **ESP32-C3 `GPIO 5`** $\rightarrow$ **Encoder Phase B (DT)**
-    
-- **ESP32-C3 `GPIO 4`** $\rightarrow$ **Encoder Switch (SW)**
-
-
 
 
 
