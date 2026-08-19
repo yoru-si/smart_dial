@@ -1,0 +1,498 @@
+# Board: ESP32-C3 Super Mini (Generic)
+# Definition: definitions/boards/esp32-c3-supermini/manifest.yaml
+
+substitutions:
+  light1_entity: "light.desk_lamp"   
+  light2_entity: "light.mirror_light"
+  # How much brightness (0-255) changes per single encoder tick.
+  # Lower = slower / more turns needed for full range.
+  brightness_step: "3"
+
+esphome:
+  name: knob-control
+  friendly_name: knob-control
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          ESP_LOGI("boot", "light1_entity=%s light2_entity=%s", "${light1_entity}", "${light2_entity}");
+
+esp32:
+  variant: esp32c3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "JR2i8QHSKM0NnnsoMdjfp/ZrYmX+/Mg97euhpR26eiI="
+  # The homeassistant sensor/binary_sensor platforms below only report a
+  # light's state when it CHANGES after subscribing - HA does not push the
+  # current value on connect. So on every fresh connection we proactively
+  # ask HA (via a script we define on the HA side) to report current state
+  # back to us through these custom services.
+  services:
+    - service: report_light1_state
+      variables:
+        is_on: bool
+        brightness_pct: int
+      then:
+        - lambda: |-
+            ESP_LOGD("ha_sync", "light1 PULLED from HA: on=%d brightness_pct=%d", is_on, brightness_pct);
+            id(light1_on) = is_on;
+            id(light1_brightness) = (int)(brightness_pct / 100.0 * 255);
+            id(light1_synced) = true;
+        - script.execute: sync_ui
+    - service: report_light2_state
+      variables:
+        is_on: bool
+        brightness_pct: int
+      then:
+        - lambda: |-
+            ESP_LOGD("ha_sync", "light2 PULLED from HA: on=%d brightness_pct=%d", is_on, brightness_pct);
+            id(light2_on) = is_on;
+            id(light2_brightness) = (int)(brightness_pct / 100.0 * 255);
+            id(light2_synced) = true;
+        - script.execute: sync_ui
+  on_client_connected:
+    then:
+      - script.execute: auto_sync_loop
+    
+
+  on_client_disconnected:
+    then:
+      - logger.log: "API client disconnected"
+
+ota:
+  - platform: esphome
+    password: srik2109
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "knob-control Fallback Hotspot"
+    password: "fOThmmbsV8EJ"
+
+captive_portal:
+
+# --- Ambient light sensor ---
+i2c:
+  - id: i2c_1
+    scl: 6
+    sda: 7
+
+# --- Static image for the "gallery" screen (mode 2) ---
+# Drop a PNG or JPG named idle.png next to this yaml file (any size works,
+# it gets resized). For an animated GIF-like effect on an ESP32-C3 with no
+# PSRAM, true GIF decoding is risky (memory-heavy) - a safer route is an
+# `animimg` LVGL widget cycling a handful of small still frames instead.
+# Ask if you want that version.
+image:
+  - file: "idle.png"
+    id: idle_pic
+    resize: 240x240
+    type: RGB565
+
+sensor:
+  - platform: bh1750
+    name: "BH1750 Ambient Light Sensor"
+    id: sensor_bh1750_1
+    i2c_id: i2c_1
+    icon: "mdi:television-ambient-light"
+    update_interval: 5s
+
+  # --- Rotary encoder raw position. We diff it against the last seen value
+  # in adjust_brightness, so drift in the raw count never matters. ---
+  - platform: rotary_encoder
+    name: "Knob Position"
+    id: knob_encoder
+    internal: true
+    pin_a:
+      number: GPIO10
+      mode: INPUT_PULLUP
+    pin_b:
+      number: GPIO20
+      mode: INPUT_PULLUP
+    filters:
+      - delta: 1
+    on_value:
+      then:
+        - script.execute:
+            id: adjust_brightness
+            x: !lambda 'return x;'
+
+  # --- Read the actual brightness back from Home Assistant for each light ---
+  - platform: homeassistant
+    id: ha_light1_brightness
+    entity_id: ${light1_entity}
+    attribute: brightness
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGD("ha_sync", "light1 brightness from HA: %f", x);
+            if (!std::isnan(x)) {
+              id(light1_brightness) = (int) x;
+            }
+        - script.execute: sync_ui
+
+  - platform: homeassistant
+    id: ha_light2_brightness
+    entity_id: ${light2_entity}
+    attribute: brightness
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGD("ha_sync", "light2 brightness from HA: %f", x);
+            if (!std::isnan(x)) {
+              id(light2_brightness) = (int) x;
+            }
+        - script.execute: sync_ui
+
+# --- Encoder push button, debounced ---
+binary_sensor:
+  - platform: gpio
+    id: knob_button
+    name: "Knob Button"
+    pin:
+      number: GPIO21
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 15ms
+    on_click:
+      min_length: 50ms
+      max_length: 600ms
+      then:
+        - script.execute: cycle_mode
+    on_multi_click:
+      - timing:
+          - ON for at least 500ms
+        then:
+          - script.execute: toggle_selected
+
+  # --- Read actual on/off state back from Home Assistant for each light.
+  # This is also what unlocks apply_light_state (see light1_synced/light2_synced
+  # below) - until we've heard from HA at least once, we never push our own
+  # (possibly stale/default) state back out, so we can't stomp on the real light. ---
+  - platform: homeassistant
+    id: ha_light1_state
+    entity_id: ${light1_entity}
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            ESP_LOGD("ha_sync", "light1 state from HA: %d", x);
+            id(light1_on) = x;
+            id(light1_synced) = true;
+        - script.execute: sync_ui
+
+  - platform: homeassistant
+    id: ha_light2_state
+    entity_id: ${light2_entity}
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            ESP_LOGD("ha_sync", "light2 state from HA: %d", x);
+            id(light2_on) = x;
+            id(light2_synced) = true;
+        - script.execute: sync_ui
+
+# --- Display bus ---
+spi:
+  clk_pin: GPIO5
+  mosi_pin: GPIO4
+
+display:
+  - platform: ili9xxx
+    model: GC9A01A
+    id: my_display
+    dc_pin: GPIO1
+    reset_pin: GPIO3
+    rotation: 0
+    invert_colors: true
+    update_interval: never   # LVGL drives rendering
+    # No cs_pin: CS is hardwired to GND on this board
+
+# --- Display backlight ---
+output:
+  - platform: ledc
+    pin: GPIO0
+    id: backlight_output
+
+light:
+  - platform: monochromatic
+    output: backlight_output
+    id: display_backlight
+    name: "Display Backlight"
+    restore_mode: ALWAYS_ON
+
+# --- State tracking ---
+globals:
+  - id: mode_index          # 0 = Light 1, 1 = Light 2, 2 = Gallery
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: light1_on
+    type: bool
+    initial_value: 'false'
+  - id: light2_on
+    type: bool
+    initial_value: 'false'
+  - id: light1_brightness    # 0-255, independent per light
+    type: int
+    initial_value: '180'
+  - id: light2_brightness
+    type: int
+    initial_value: '180'
+  - id: knob_prev_raw        # last raw encoder count we saw, for delta calc
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # True once we've received a real state from HA for that light - guards
+  # against pushing our default/stale state out before we know the truth.
+  - id: light1_synced
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: light2_synced
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+# --- Behavior scripts ---
+script:
+  - id: cycle_mode
+    then:
+      - lambda: |-
+          id(mode_index) = (id(mode_index) + 1) % 3;
+      - script.execute: refresh_ui
+
+  - id: toggle_selected
+    then:
+      - lambda: |-
+          if (id(mode_index) == 0) {
+            id(light1_on) = !id(light1_on);
+          } else if (id(mode_index) == 1) {
+            id(light2_on) = !id(light2_on);
+          }
+          // mode 2 (gallery): nothing to toggle, no-op
+      - if:
+          condition:
+            lambda: 'return id(mode_index) != 2;'
+          then:
+            - script.execute: apply_light_state
+      - script.execute: refresh_ui
+
+  - id: adjust_brightness
+    parameters:
+      x: int
+    then:
+      - lambda: |-
+          int delta = x - id(knob_prev_raw);
+          id(knob_prev_raw) = x;
+          if (delta == 0 || id(mode_index) == 2) {
+            return;
+          }
+          int change = delta * ${brightness_step};
+          if (id(mode_index) == 0) {
+            int b = id(light1_brightness) + change;
+            if (b < 0) b = 0;
+            if (b > 255) b = 255;
+            id(light1_brightness) = b;
+          } else {
+            int b = id(light2_brightness) + change;
+            if (b < 0) b = 0;
+            if (b > 255) b = 255;
+            id(light2_brightness) = b;
+          }
+      - if:
+          condition:
+            lambda: 'return id(mode_index) != 2;'
+          then:
+            - script.execute: apply_light_state
+            - script.execute: sync_ui   # instant, no spinner, no arc animation
+
+  # Pushes the currently-selected light's state to Home Assistant.
+  # Guarded by light{n}_synced so we never overwrite the real light before
+  # we've heard its actual state at least once.
+  - id: apply_light_state
+    then:
+      - lambda: |-
+          ESP_LOGD("sync", "apply_light_state: mode=%d light1_synced=%d light2_synced=%d light1_on=%d light2_on=%d",
+                   id(mode_index), id(light1_synced), id(light2_synced), id(light1_on), id(light2_on));
+      - if:
+          condition:
+            lambda: 'return id(mode_index) == 0 && id(light1_synced);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(light1_on);'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: ${light1_entity}
+                        brightness_pct: !lambda 'return (int)(id(light1_brightness) / 255.0 * 100);'
+                else:
+                  - homeassistant.service:
+                      service: light.turn_off
+                      data:
+                        entity_id: ${light1_entity}
+      - if:
+          condition:
+            lambda: 'return id(mode_index) == 1 && id(light2_synced);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(light2_on);'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: ${light2_entity}
+                        brightness_pct: !lambda 'return (int)(id(light2_brightness) / 255.0 * 100);'
+                else:
+                  - homeassistant.service:
+                      service: light.turn_off
+                      data:
+                        entity_id: ${light2_entity}
+
+  # Full UI refresh with a brief spinner - use for discrete LOCAL actions
+  # (button press: mode switch / toggle). NOT used for knob dialing anymore.
+  - id: refresh_ui
+    mode: restart
+    then:
+      - lvgl.widget.update:
+          id: confirm_spinner
+          hidden: false
+      - script.execute: sync_ui
+      - delay: 700ms
+      - lvgl.widget.update:
+          id: confirm_spinner
+          hidden: true
+
+  # Silent, instant UI sync - used for knob dialing AND for updates arriving
+  # from Home Assistant. No spinner, no arc animation.
+  - id: sync_ui
+    then:
+      - lvgl.widget.update:
+          id: mode_label
+          hidden: !lambda 'return id(mode_index) == 2;'
+      - lvgl.widget.update:
+          id: brightness_arc
+          hidden: !lambda 'return id(mode_index) == 2;'
+      - lvgl.widget.update:
+          id: light1_dot
+          hidden: !lambda 'return id(mode_index) == 2;'
+      - lvgl.widget.update:
+          id: light2_dot
+          hidden: !lambda 'return id(mode_index) == 2;'
+      - lvgl.widget.update:
+          id: idle_image
+          hidden: !lambda 'return id(mode_index) != 2;'
+      - lvgl.label.update:
+          id: mode_label
+          text: !lambda |-
+            if (id(mode_index) == 0) return "Light 1";
+            if (id(mode_index) == 1) return "Light 2";
+            return "";
+      - lvgl.arc.update:
+          id: brightness_arc
+          value: !lambda |-
+            if (id(mode_index) == 0) return id(light1_brightness);
+            if (id(mode_index) == 1) return id(light2_brightness);
+            return 0;
+      - lvgl.obj.update:
+          id: light1_dot
+          bg_color: !lambda 'return id(light1_on) ? lv_color_hex(0x00AEEF) : lv_color_hex(0x333333);'
+      - lvgl.obj.update:
+          id: light2_dot
+          bg_color: !lambda 'return id(light2_on) ? lv_color_hex(0x00AEEF) : lv_color_hex(0x333333);'
+
+  - id: auto_sync_loop
+    mode: restart
+    then:
+      - delay: 4s
+      - while:
+          condition:
+            lambda: 'return !id(light1_synced) || !id(light2_synced);'
+          then:
+            - homeassistant.service:
+                service: script.report_light_states_to_knob_control
+            - delay: 5s
+# --- Round UI ---
+lvgl:
+  displays:
+    - my_display
+  bg_color: 0x000000
+  widgets:
+    - label:
+        id: mode_label
+        text: "Light 1"
+        align: TOP_MID
+        y: 60
+        text_font: montserrat_20
+        text_color: 0xFFFFFF
+
+    - arc:
+        id: brightness_arc
+        align: CENTER
+        width: 230
+        height: 230
+        min_value: 0
+        max_value: 255
+        value: 180
+        start_angle: 0
+        end_angle: 360
+        rotation: 270
+        arc_color: 0x222222
+        arc_width: 10
+        adjustable: false
+        indicator:
+          arc_color: 0x00AEEF
+          arc_width: 10
+
+    - obj:
+        id: light1_dot
+        width: 24
+        height: 24
+        radius: 12
+        align: LEFT_MID
+        x: 60
+        bg_color: 0x333333
+        border_width: 0
+
+    - obj:
+        id: light2_dot
+        width: 24
+        height: 24
+        radius: 12
+        align: RIGHT_MID
+        x: -60
+        bg_color: 0x333333
+        border_width: 0
+
+    # Gallery screen (mode 2): just the picture, hidden until that mode
+    - image:
+        id: idle_image
+        src: idle_pic
+        align: CENTER
+        hidden: true
+
+    # Confirmation spinner: hidden by default, flashes briefly on button
+    # presses only (mode switch / toggle) - not on knob dialing
+    - spinner:
+        id: confirm_spinner
+        align: BOTTOM_MID
+        y: -20
+        width: 28
+        height: 28
+        spin_time: 1s
+        arc_length: 90deg
+        hidden: true
