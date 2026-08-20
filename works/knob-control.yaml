@@ -64,6 +64,11 @@ api:
   on_client_disconnected:
     then:
       - logger.log: "API client disconnected"
+      # reset sync flags so a reconnect always triggers a fresh catch up with brightness states.
+      - lambda: |-
+          id(light1_synced) = false;
+          id(light2_synced) = false;
+
 
 ota:
   - platform: esphome

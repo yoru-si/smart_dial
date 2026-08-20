@@ -1,0 +1,18 @@
+# entity ID: script.report_light_states_to_knob_control
+alias: Report light states to knob-control
+sequence:
+  - data:
+      is_on: '{{ is_state(''light.desk_lamp'', ''on'') }}'
+      brightness_pct: >
+        {{ ((state_attr('light.desk_lamp', 'brightness') | default(0) | int) /
+        255 * 100) | round(0) }}
+    action: esphome.knob_control_report_light1_state
+    continue_on_error: true
+  - data:
+      is_on: '{{ is_state(''light.mirror_light'', ''on'') }}'
+      brightness_pct: >
+        {{ ((state_attr('light.mirror_light', 'brightness') | default(0) | int)
+        / 255 * 100) | round(0) }}
+    action: esphome.knob_control_report_light2_state
+    continue_on_error: true
+
